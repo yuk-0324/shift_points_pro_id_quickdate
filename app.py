@@ -277,7 +277,7 @@ if page == "入力":
         with col_date_flags1:
             use_today = st.toggle("今日の日付で記録する", value=True)
         with col_date_flags2:
-            yesterday_click = st.button("昨日で記録", width="stretch")
+            yesterday_click = st.button("昨日で記録")
 
         with st.form("entry_form", clear_on_submit=True):
             c1, c2, c3 = st.columns([1,1,1])
@@ -317,8 +317,7 @@ if page == "入力":
                 st.write("")  # 余白
                 submit_btn = st.form_submit_button(
                     "追加する",
-                    type="primary",
-                    width="stretch"
+                    type="primary"
                 )
 
             if submit_btn:
@@ -406,7 +405,6 @@ elif page == "順位":
 
         st.dataframe(
             team_totals,
-            width="stretch",
             hide_index=True
         )
 
@@ -476,7 +474,6 @@ elif page == "名簿":
 
         st.dataframe(
             merged[["社員ID", "名前", "グループ", "累計ポイント"]],
-            width="stretch",
             hide_index=True
         )
 
@@ -589,8 +586,7 @@ elif page == "設定":
         st.session_state["records_work"] = st.data_editor(
             st.session_state["records_work"],
             num_rows="fixed",
-            key="records_edit",
-            width="stretch"
+            key="records_edit"
         )
 
         # 削除対象のチェック
