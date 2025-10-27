@@ -1,4 +1,3 @@
-
 import os
 import sqlite3
 from pathlib import Path
@@ -8,16 +7,27 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+# =========================================================
+# 初期ロードと基本設定
+# =========================================================
 load_dotenv()
-ADMIN_PIN = os.getenv("ADMIN_PIN", "1234")
+ADMIN_PIN = os.getenv("ADMIN_PIN", "329865")  # PIN
 
-st.set_page_config(page_title="シフトポイント（ID・日付自動化）", layout="wide")
+st.set_page_config(
+    page_title="B-POINT選手権 ☕",
+    layout="wide"
+)
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "app.db"
+BACKUP_PATH = DATA_DIR / "latest_backup.csv"  # 最新バックアップ1本だけ保持
 
+
+# =========================================================
+# DBまわり
+# =========================================================
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -25,49 +35,45 @@ def get_conn():
 
 def init_db():
     with get_conn() as conn:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS roster (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            emp_id TEXT UNIQUE,
-            name TEXT NOT NULL UNIQUE,
-            grp TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS shifts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE
-        );
-        CREATE TABLE IF NOT EXISTS records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            d TEXT NOT NULL,
-            shift TEXT NOT NULL,
-            emp_id TEXT NOT NULL,
-            grp TEXT NOT NULL,
-            points REAL NOT NULL CHECK(points >= 0),
-            memo TEXT,
-            UNIQUE(d, shift, emp_id)
-        );
-        CREATE TABLE IF NOT EXISTS locks (
-            ym TEXT PRIMARY KEY
-        );
-        """)
-        if conn.execute("SELECT COUNT(*) FROM shifts").fetchone()[0] == 0:
-            conn.executemany("INSERT INTO shifts(name) VALUES(?)", [("早番",),("中番",),("遅番",)])
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS roster (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                emp_id TEXT UNIQUE,
+                name TEXT NOT NULL UNIQUE,
+                grp TEXT NOT NULL
+            );
 
-def ensure_onboarding():
-    with get_conn() as conn:
-        if conn.execute("SELECT COUNT(*) FROM roster").fetchone()[0] == 0:
-            conn.executemany("INSERT INTO roster(emp_id, name, grp) VALUES(?,?,?)", [
-                ("E0001","山田 太郎","A"),
-                ("E0002","佐藤 花子","A"),
-                ("E0003","鈴木 次郎","B"),
-                ("E0004","田中 三奈","B"),
-                ("E0005","高橋 四郎","C"),
-            ])
+            CREATE TABLE IF NOT EXISTS records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                d TEXT NOT NULL,          -- YYYY-MM-DD
+                emp_id TEXT NOT NULL,
+                grp TEXT NOT NULL,
+                points REAL NOT NULL CHECK(points >= 0),
+                -- 以下2つはもうUIから使わないが互換性のために残す
+                shift TEXT,
+                memo TEXT,
+                UNIQUE(d, emp_id)
+            );
 
+            CREATE TABLE IF NOT EXISTS locks (
+                ym TEXT PRIMARY KEY       -- 'YYYY-MM'
+            );
+            """
+        )
+
+
+init_db()
+
+
+# =========================================================
+# ロック確認
+# =========================================================
 def is_locked(dt: date):
     ym = f"{dt.year:04d}-{dt.month:02d}"
     with get_conn() as conn:
-        return conn.execute("SELECT 1 FROM locks WHERE ym=?", (ym,)).fetchone() is not None
+        row = conn.execute("SELECT 1 FROM locks WHERE ym=?", (ym,)).fetchone()
+    return row is not None
 
 def lock_month(dt: date):
     ym = f"{dt.year:04d}-{dt.month:02d}"
@@ -79,297 +85,693 @@ def unlock_month(dt: date):
     with get_conn() as conn:
         conn.execute("DELETE FROM locks WHERE ym=?", (ym,))
 
-init_db(); ensure_onboarding()
 
+# =========================================================
+# データ取得系
+# =========================================================
 def get_roster_df():
     with get_conn() as conn:
-        return pd.read_sql_query("SELECT emp_id AS 社員ID, name AS 名前, grp AS グループ FROM roster ORDER BY emp_id", conn)
+        df = pd.read_sql_query(
+            "SELECT emp_id AS 社員ID, name AS 名前, grp AS グループ FROM roster ORDER BY emp_id",
+            conn
+        )
+    return df
 
-def get_shifts():
-    with get_conn() as conn:
-        return [r[0] for r in conn.execute("SELECT name FROM shifts ORDER BY name").fetchall()]
-
-def add_record(d: date, shift: str, emp_id: str, points: float, memo: str=""):
-    if is_locked(d):
-        st.error("この月は締め済みのため入力できません。")
-        return False
-    roster = get_roster_df().set_index("社員ID")
-    if emp_id not in roster.index:
-        st.error("社員IDが名簿に存在しません。名簿ページで登録してください。")
-        return False
-    grp = roster.loc[emp_id, "グループ"]
-    try:
-        with get_conn() as conn:
-            conn.execute(
-                "INSERT INTO records(d, shift, emp_id, grp, points, memo) VALUES(?,?,?,?,?,?)",
-                (d.isoformat(), shift, emp_id, grp, float(points), memo or "")
-            )
-        return True
-    except sqlite3.IntegrityError:
-        st.warning("同じ日付×シフト×社員IDの記録がすでにあります。")
-        return False
-
-def query_range(start: _dt.date, end: _dt.date):
+def get_records_df():
     with get_conn() as conn:
         df = pd.read_sql_query(
-            "SELECT d, shift, emp_id, grp, points, memo FROM records WHERE d >= ? AND d < ?",
-            conn, params=(start.isoformat(), end.isoformat())
+            """
+            SELECT id, d, emp_id, grp, points, shift, memo
+            FROM records
+            ORDER BY d ASC, emp_id ASC
+            """,
+            conn
+        )
+    return df
+
+def query_range(start: _dt.date, end: _dt.date):
+    """start <= d < end のデータを返す"""
+    with get_conn() as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT id, d, emp_id, grp, points
+            FROM records
+            WHERE d >= ? AND d < ?
+            """,
+            conn,
+            params=(start.isoformat(), end.isoformat())
         )
     return df
 
 def month_df(base_month: date):
     start = date(base_month.year, base_month.month, 1)
-    end = date(base_month.year + (base_month.month==12), (base_month.month % 12) + 1, 1)
+    if base_month.month == 12:
+        end = date(base_month.year + 1, 1, 1)
+    else:
+        end = date(base_month.year, base_month.month + 1, 1)
     return query_range(start, end)
 
-st.sidebar.title("シフトポイント")
-page = st.sidebar.radio("メニュー", ["入力","ダッシュボード","名簿","管理"], index=0)
 
-if page == "入力":
-    st.header("クイック入力（社員ID）")
-    roster = get_roster_df()
-    shifts = get_shifts()
-    if roster.empty:
-        st.info("名簿が空です。まずは「名簿」ページで登録してください。")
-    else:
-        options = {f"{r['社員ID']} - {r['名前']}": r["社員ID"] for _, r in roster.iterrows()}
+# =========================================================
+# 自動バックアップ（最新のみ）
+# =========================================================
+def auto_backup_latest():
+    """
+    現在の全recordsをCSVとしてlatest_backup.csvに保存する。
+    最新1本だけを常に上書き保持するイメージ。
+    """
+    try:
+        df_all = get_records_df()
+        df_all.to_csv(BACKUP_PATH, index=False, encoding="utf-8-sig")
+    except Exception:
+        # バックアップ失敗してもアプリは落とさない
+        pass
 
-        st.caption("日付は既定で『今日』。必要があれば切り替え可。")
-        c_top1, c_top2, _ = st.columns([1,1,1])
-        with c_top1:
-            use_today = st.toggle("今日の日付で記録する", value=True)
-        with c_top2:
-            yesterday_click = st.button("昨日で記録", use_container_width=True)
+# アプリに誰かがアクセスするたびに呼ぶ
+auto_backup_latest()
 
-        with st.form("entry", clear_on_submit=True):
-            c1, c2, c3 = st.columns([1,1,1.2])
-            with c1:
-                if yesterday_click:
-                    d = date.today() - timedelta(days=1)
-                elif use_today:
-                    d = date.today()
-                else:
-                    d = st.date_input("日付 *", value=date.today())
-                shift = st.selectbox("シフト *", options=shifts, index=0)
-            with c2:
-                label = st.selectbox("社員ID *（表示：ID - 名前）", options=list(options.keys()), index=0)
-                emp_id = options[label]
-                grp = roster.set_index("社員ID").loc[emp_id, "グループ"]
-                st.text_input("グループ（自動）", value=grp, disabled=True)
-            with c3:
-                point = st.number_input("ポイント *", min_value=0.0, step=0.5, value=0.0, format="%.1f")
-                memo = st.text_input("メモ（任意）", value="")
 
-            ok = st.form_submit_button("追加する", type="primary", use_container_width=True)
-            if ok:
-                errs = []
-                if d is None: errs.append("日付")
-                if not shift: errs.append("シフト")
-                if not emp_id: errs.append("社員ID")
-                if point is None: errs.append("ポイント")
-                if errs:
-                    st.error("必須項目が未入力: " + ", ".join(errs))
-                else:
-                    if add_record(d, shift, emp_id, point, memo):
-                        st.success(f"追加しました！（{d} / {shift} / {label}）")
+# =========================================================
+# 入力（1日1人1回）を追加
+# =========================================================
+def add_record(d: date, emp_id: str, points: float):
+    # 月ロックチェック
+    if is_locked(d):
+        st.error("この月は締め済みのため入力できません。")
+        return False
 
-    st.divider()
-    st.subheader("最近の入力（当月）")
-    dfm = month_df(date.today().replace(day=1))
-    if dfm.empty:
-        st.caption("この月のデータはありません。")
-    else:
-        dfm["日付"] = pd.to_datetime(dfm["d"]).dt.date
-        dfm["ポイント"] = pd.to_numeric(dfm["points"], errors="coerce").fillna(0.0)
-        st.dataframe(dfm.sort_values("日付", ascending=False).head(10), use_container_width=True)
+    # rosterからグループ確認
+    roster = get_roster_df().set_index("社員ID")
+    if emp_id not in roster.index:
+        st.error("その社員IDは名簿にありません（設定→名簿編集で登録してください）")
+        return False
+    grp = roster.loc[emp_id, "グループ"]
 
-elif page == "ダッシュボード":
-    st.header("ダッシュボード")
+    # 重複(同じ日×同じ人)チェック
+    with get_conn() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM records WHERE d=? AND emp_id=?",
+            (d.isoformat(), emp_id)
+        ).fetchone()
+        if exists:
+            st.warning("この人はこの日にすでに登録済みです。")
+            return False
 
-    presets = ["今日", "今週", "今月", "先月", "カスタム"]
-    preset = st.radio("期間", presets, horizontal=True, index=2)
+        # shiftとmemoは今後使わないので空文字を入れる
+        conn.execute(
+            """
+            INSERT INTO records(d, emp_id, grp, points, shift, memo)
+            VALUES(?,?,?,?,?,?)
+            """,
+            (d.isoformat(), emp_id, grp, float(points), "", "")
+        )
+    return True
 
-    def _week_range(d: _dt.date):
+
+# =========================================================
+# 社員の累計ポイント（全期間）
+# =========================================================
+def get_total_points_by_emp():
+    rec = get_records_df()
+    if rec.empty:
+        return pd.DataFrame(columns=["社員ID", "累計ポイント"])
+    agg = (
+        rec.groupby("emp_id", as_index=False)["points"]
+        .sum()
+        .rename(columns={"emp_id": "社員ID", "points": "累計ポイント"})
+    )
+    return agg
+
+
+# =========================================================
+# 共通：期間プリセット
+# =========================================================
+def get_period(preset: str):
+    today = _dt.date.today()
+
+    def week_range(d: _dt.date):
+        # 週は月曜はじまり (weekday()=0が月曜)
         start = d - _dt.timedelta(days=d.weekday())
         end = start + _dt.timedelta(days=7)
         return start, end
 
-    def _month_range(d: _dt.date):
+    def month_range(d: _dt.date):
         start = _dt.date(d.year, d.month, 1)
         if d.month == 12:
-            end = _dt.date(d.year+1, 1, 1)
+            end = _dt.date(d.year + 1, 1, 1)
         else:
-            end = _dt.date(d.year, d.month+1, 1)
+            end = _dt.date(d.year, d.month + 1, 1)
         return start, end
 
-    def _prev_month_range(d: _dt.date):
+    def prev_month_range(d: _dt.date):
         if d.month == 1:
-            start = _dt.date(d.year-1, 12, 1)
+            start = _dt.date(d.year - 1, 12, 1)
         else:
-            start = _dt.date(d.year, d.month-1, 1)
+            start = _dt.date(d.year, d.month - 1, 1)
         end = _dt.date(d.year, d.month, 1)
         return start, end
 
-    today = _dt.date.today()
     if preset == "今日":
-        start, end = today, today + _dt.timedelta(days=1)
+        return today, today + _dt.timedelta(days=1)
     elif preset == "今週":
-        start, end = _week_range(today)
+        return week_range(today)
     elif preset == "今月":
-        start, end = _month_range(today)
+        return month_range(today)
     elif preset == "先月":
-        start, end = _prev_month_range(today)
+        return prev_month_range(today)
     else:
-        c1, c2 = st.columns(2)
-        with c1:
-            start = st.date_input("開始日", value=today.replace(day=1))
-        with c2:
-            end = st.date_input("終了日（翌日でも可）", value=_month_range(today)[1])
-        if start >= end:
+        # preset == "カスタム" は後でUI側で手動指定
+        return None, None
+
+
+# =========================================================
+# UI: サイドバー
+# =========================================================
+st.sidebar.title("B-POINT選手権 ☕")
+page = st.sidebar.radio(
+    "メニュー",
+    ["入力", "順位", "名簿", "設定"],
+    index=0
+)
+
+
+# =========================================================
+# ページ1: 入力（スタッフ用）
+# =========================================================
+if page == "入力":
+    st.header("入力")
+
+    roster = get_roster_df()
+    if roster.empty:
+        st.info("まだ名簿がありません（設定→名簿編集で登録してください）")
+    else:
+        # 表示ラベル "ID - 名前" -> 実値emp_id
+        choices_map = {
+            f"{row['社員ID']} - {row['名前']}": row["社員ID"]
+            for _, row in roster.iterrows()
+        }
+
+        # 日付の扱い
+        st.caption("日付は基本『今日』になります。必要なら昨日ボタンで変更。")
+        col_date_flags1, col_date_flags2, _ = st.columns([1,1,1])
+        with col_date_flags1:
+            use_today = st.toggle("今日の日付で記録する", value=True)
+        with col_date_flags2:
+            yesterday_click = st.button("昨日で記録", width="stretch")
+
+        with st.form("entry_form", clear_on_submit=True):
+            c1, c2, c3 = st.columns([1,1,1])
+            with c1:
+                # 日付ロジック
+                if yesterday_click:
+                    d_val = date.today() - timedelta(days=1)
+                elif use_today:
+                    d_val = date.today()
+                else:
+                    d_val = st.date_input("日付 *", value=date.today())
+
+                selected_label = st.selectbox(
+                    "社員ID *（ID - 名前）",
+                    options=list(choices_map.keys()),
+                    index=0
+                )
+                emp_id = choices_map[selected_label]
+
+                # グループ自動表示
+                grp_val = (
+                    roster.set_index("社員ID")
+                    .loc[emp_id, "グループ"]
+                )
+                st.text_input("チーム（自動）", value=grp_val, disabled=True)
+
+            with c2:
+                point_val = st.number_input(
+                    "ポイント *",
+                    min_value=0.0,
+                    step=0.5,
+                    value=0.0,
+                    format="%.1f"
+                )
+
+            with c3:
+                st.write("")  # 余白
+                submit_btn = st.form_submit_button(
+                    "追加する",
+                    type="primary",
+                    width="stretch"
+                )
+
+            if submit_btn:
+                # 必須チェック
+                missing = []
+                if d_val is None:
+                    missing.append("日付")
+                if not emp_id:
+                    missing.append("社員ID")
+                if point_val is None:
+                    missing.append("ポイント")
+
+                if missing:
+                    st.error("必須項目が未入力: " + ", ".join(missing))
+                else:
+                    ok = add_record(d_val, emp_id, point_val)
+                    if ok:
+                        st.success(f"追加しました！（{d_val} / {selected_label} / {point_val:.1f}pt）")
+
+    # 入力画面では最近ログは表示しない（店員が見れないようにする）
+
+
+# =========================================================
+# ページ2: 順位（旧ダッシュボード / 閲覧のみ）
+# =========================================================
+elif page == "順位":
+    st.header("順位")
+
+    presets = ["今日", "今週", "今月", "先月", "カスタム"]
+    preset = st.radio("期間", presets, horizontal=True, index=2)  # デフォルト今月
+
+    today = _dt.date.today()
+    if preset == "カスタム":
+        c_custom1, c_custom2 = st.columns(2)
+        with c_custom1:
+            start_date = st.date_input("開始日", value=today.replace(day=1))
+        with c_custom2:
+            # デフォルトは今月末の次の日
+            end_default = (
+                _dt.date(today.year + (today.month == 12),
+                         (today.month % 12) + 1,
+                         1)
+            )
+            end_date = st.date_input("終了日（翌日でも可）", value=end_default)
+
+        if start_date >= end_date:
             st.warning("終了日は開始日より後にしてください。")
-
-    df = query_range(start, end)
-    st.caption(f"表示範囲：{start} 〜 {end}（{(end - start).days}日間）")
-
-    if df.empty:
-        st.info("データがありません。まずは入力ページから追加してください。")
+        period_start, period_end = start_date, end_date
     else:
-        df["日付"] = pd.to_datetime(df["d"]).dt.date
-        df["ポイント"] = pd.to_numeric(df["points"], errors="coerce").fillna(0.0)
-        roster = get_roster_df().rename(columns={"社員ID":"emp_id"}).set_index("emp_id")
-        df["名前"] = df["emp_id"].map(roster["名前"])
-        df["グループ"] = df["grp"]
-        df["シフト"] = df["shift"]
-        df["社員ID"] = df["emp_id"]
-        df = df[["日付","シフト","社員ID","名前","グループ","ポイント","memo"]].rename(columns={"memo":"メモ"})
+        period_start, period_end = get_period(preset)
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("グループ別 合計")
-            g = df.groupby("グループ", dropna=False, as_index=False)["ポイント"].sum().rename(columns={"ポイント":"合計ポイント"})
-            g = g.sort_values("合計ポイント", ascending=False)
-            st.dataframe(g, use_container_width=True, hide_index=True)
-            if not g.empty:
-                st.bar_chart(g.set_index("グループ"))
-        with c2:
-            st.subheader("個人合算 ランキング")
-            p = df.groupby(["社員ID","名前"], as_index=False)["ポイント"].sum().rename(columns={"ポイント":"合計ポイント"})
-            p = p.sort_values("合計ポイント", ascending=False)
-            st.dataframe(p.head(10), use_container_width=True, hide_index=True)
-            st.markdown("**TOP3**")
-            cA, cB = st.columns(2)
-            if len(p) > 0:
-                st.metric("1位", f"{p.iloc[0]['名前']}（{p.iloc[0]['社員ID']}）", f"{p.iloc[0]['合計ポイント']:.1f}")
-            with cA:
-                if len(p) > 1:
-                    st.metric("2位", f"{p.iloc[1]['名前']}（{p.iloc[1]['社員ID']}）", f"{p.iloc[1]['合計ポイント']:.1f}")
-            with cB:
-                if len(p) > 2:
-                    st.metric("3位", f"{p.iloc[2]['名前']}（{p.iloc[2]['社員ID']}）", f"{p.iloc[2]['合計ポイント']:.1f}")
+    st.caption(
+        f"表示範囲：{period_start} 〜 {period_end} "
+        f"（{(period_end - period_start).days}日間）"
+        if period_start and period_end else ""
+    )
+
+    df_range = query_range(period_start, period_end)
+    if df_range.empty:
+        st.info("この期間のデータはありません。")
+    else:
+        # rosterと結合して「名前」を出す
+        roster = get_roster_df().rename(columns={"社員ID":"emp_id"}).set_index("emp_id")
+        df_range = df_range.copy()
+        df_range["名前"] = df_range["emp_id"].map(roster["名前"])
+        df_range["チーム"] = df_range["grp"]
+        df_range["ポイント"] = pd.to_numeric(df_range["points"], errors="coerce").fillna(0.0)
+
+        # -------------------
+        # A. チーム順位（1位〜最後まで）
+        # -------------------
+        st.subheader("チーム順位（合計ポイント）")
+
+        team_totals = (
+            df_range
+            .groupby("チーム", as_index=False)["ポイント"]
+            .sum()
+            .rename(columns={"ポイント": "合計ポイント"})
+            .sort_values("合計ポイント", ascending=False)
+            .reset_index(drop=True)
+        )
+
+        # 順位番号をつける
+        team_totals.insert(0, "順位", range(1, len(team_totals) + 1))
+
+        st.dataframe(
+            team_totals,
+            width="stretch",
+            hide_index=True
+        )
+
 
         st.divider()
-        with st.expander("明細（期間内）"):
-            st.dataframe(df.sort_values("日付", ascending=False), use_container_width=True, hide_index=True)
 
+        # -------------------
+        # B. チームごとの個人TOP3
+        # -------------------
+        st.subheader("各チームの個人TOP3")
+
+        # 個人ごとの合計
+        per_person = (
+            df_range
+            .groupby(["チーム", "emp_id", "名前"], as_index=False)["ポイント"]
+            .sum()
+            .rename(columns={"ポイント": "個人合計"})
+        )
+
+        # チームごとにTOP3を出す
+        for team_name in per_person["チーム"].unique():
+            sub = (
+                per_person[per_person["チーム"] == team_name]
+                .sort_values("個人合計", ascending=False)
+                .head(3)
+                .reset_index(drop=True)
+            )
+            st.markdown(f"**{team_name}**")
+            # 1位,2位,3位の形式で見せる
+            for i, row in sub.iterrows():
+                rank_num = i + 1
+                st.write(
+                    f"{rank_num}位: {row['名前']}（{row['emp_id']}） - {row['個人合計']:.1f} pt"
+                )
+            st.write("---")
+
+
+# =========================================================
+# ページ3: 名簿（閲覧専用）
+# =========================================================
 elif page == "名簿":
-    st.header("名簿（社員ID・名前・グループ）")
-    df = get_roster_df()
-    st.caption("社員IDはユニーク。入力はID、表示は名前。")
-    edited = st.data_editor(
-        df if not df.empty else pd.DataFrame({"社員ID":[],"名前":[],"グループ":[]}),
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "社員ID": st.column_config.TextColumn("社員ID", required=True),
-            "名前": st.column_config.TextColumn("名前", required=True),
-            "グループ": st.column_config.TextColumn("グループ", required=True),
-        }
-    )
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("保存する", type="primary", use_container_width=True):
-            e = edited.copy().dropna(subset=["社員ID","名前","グループ"])
-            for col in ["社員ID","名前","グループ"]:
-                e[col] = e[col].astype(str).str.strip()
-            if e["社員ID"].duplicated().any():
-                st.error("社員IDが重複しています。ユニークにしてください。")
-            else:
-                with get_conn() as conn:
-                    conn.execute("DELETE FROM roster")
-                    conn.executemany("INSERT INTO roster(emp_id, name, grp) VALUES(?,?,?)",
-                                     list(e[["社員ID","名前","グループ"]].itertuples(index=False, name=None)))
-                st.success("名簿を保存しました。")
-    with c2:
-        st.download_button("名簿CSVをエクスポート", data=edited.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="roster.csv", mime="text/csv", use_container_width=True)
+    st.header("名簿（閲覧専用）")
 
-else:
-    st.header("管理（PIN保護）")
-    pin_ok = False
-    with st.expander("管理PINを入力"):
-        pin = st.text_input("管理PIN", type="password", placeholder="例: 1234")
-        if st.button("認証", type="primary"):
-            if pin == ADMIN_PIN:
-                st.success("認証成功")
-                pin_ok = True
-            else:
-                st.error("PINが違います")
-    if not pin_ok:
-        st.info("名簿・シフト編集、月締めロック、CSV入出力はPIN認証が必要です。")
-        st.stop()
+    roster = get_roster_df()  # 社員ID, 名前, グループ
+    totals = get_total_points_by_emp()  # 社員ID, 累計ポイント
 
-    st.subheader("月締めロック")
-    c1, c2 = st.columns(2)
-    with c1:
-        d_lock = st.date_input("ロック/解除する月（1日）", value=date.today().replace(day=1))
-        if st.button("この月をロックする", use_container_width=True):
-            with get_conn() as conn: conn.execute("INSERT OR IGNORE INTO locks(ym) VALUES(?)", (f"{d_lock.year:04d}-{d_lock.month:02d}",))
-            st.success("ロックしました")
-        if st.button("この月のロックを解除する", use_container_width=True):
-            with get_conn() as conn: conn.execute("DELETE FROM locks WHERE ym=?", (f"{d_lock.year:04d}-{d_lock.month:02d}",))
-            st.success("ロックを解除しました")
+    if roster.empty:
+        st.info("まだ名簿がありません（設定→名簿編集で登録してください）")
+    else:
+        # 累計ポイントを結合
+        merged = pd.merge(
+            roster,
+            totals,
+            on="社員ID",
+            how="left"
+        )
+        merged["累計ポイント"] = pd.to_numeric(
+            merged["累計ポイント"],
+            errors="coerce"
+        ).fillna(0.0)
 
-    st.divider()
-    st.subheader("シフト候補の編集")
-    with get_conn() as conn:
-        current = [r[0] for r in conn.execute("SELECT name FROM shifts ORDER BY name").fetchall()]
-    editable = st.data_editor(pd.DataFrame({"シフト": current}), num_rows="dynamic", use_container_width=True)
-    if st.button("シフトを保存", use_container_width=True):
-        vals = [s for s in editable["シフト"].astype(str).str.strip().tolist() if s]
-        vals = sorted(list(dict.fromkeys(vals)))
-        with get_conn() as conn:
-            conn.execute("DELETE FROM shifts")
-            conn.executemany("INSERT INTO shifts(name) VALUES(?)", [(v,) for v in vals])
-        st.success("保存しました。")
+        # 見やすい並び順: グループ→ポイント降順→社員ID
+        merged = merged.sort_values(
+            by=["グループ", "累計ポイント"],
+            ascending=[True, False]
+        )
 
-    st.divider()
-    st.subheader("CSV入出力（バックアップ/移行）")
-    cA, cB = st.columns(2)
-    with cA:
-        with get_conn() as conn:
-            df_exp = pd.read_sql_query("SELECT d, shift, emp_id, grp, points, memo FROM records ORDER BY d DESC", conn)
-        st.download_button("records.csv をエクスポート", data=df_exp.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="records.csv", mime="text/csv", use_container_width=True)
-    with cB:
-        up = st.file_uploader("records.csv をインポート（上書き）", type=["csv"])
-        if up is not None:
-            try:
-                df_new = pd.read_csv(up)
-        # 列名マッピング（日本語/英語どちらでもOK）
-                col_map = {"日付":"d","シフト":"shift","社員ID":"emp_id","グループ":"grp","ポイント":"points","メモ":"memo"}
-                df_new = df_new.rename(columns=col_map)
-                need = ["d","shift","emp_id","grp","points","memo"]
-                miss = [c for c in need if c not in df_new.columns]
-                if miss:
-                    st.error(f"必要な列がありません: {miss}")
+        st.dataframe(
+            merged[["社員ID", "名前", "グループ", "累計ポイント"]],
+            width="stretch",
+            hide_index=True
+        )
+
+    st.caption("編集や新規登録は「設定」からのみできます。")
+
+
+# =========================================================
+# ページ4: 設定（PINロック ）
+# =========================================================
+elif page == "設定":
+    st.header("設定")
+
+    # ---- リフレッシュフラグ処理（最優先で実行）----
+    # 直前の操作（新規追加・全消しなど）が成功してたら画面をクリーンに描き直す
+    if st.session_state.get("refresh_settings", False):
+        st.session_state["refresh_settings"] = False
+        st.rerun()
+
+    # ---- PIN認証をセッションで保持 ----
+    if "admin_ok" not in st.session_state:
+        st.session_state["admin_ok"] = False
+
+    if not st.session_state["admin_ok"]:
+        with st.expander("PIN認証", expanded=True):
+            pin_try = st.text_input("管理PIN", type="password", placeholder="****")
+            if st.button("認証する", type="primary"):
+                if pin_try == ADMIN_PIN:
+                    st.session_state["admin_ok"] = True
+                    st.success("認証OK")
                 else:
-                    df_new["points"] = pd.to_numeric(df_new["points"], errors="coerce").fillna(0.0)
+                    st.error("PINが違います")
+
+        if not st.session_state["admin_ok"]:
+            st.info("名簿の編集・入力履歴の修正・バックアップ復元などはPINが必要です。")
+            st.stop()
+
+
+    # ← ここからは「PIN通った人だけ」が実行されるゾーン
+
+    # 直前に新規メンバー追加や全データリセットが成功していたら、ここでリロード
+    if st.session_state.get("reload_after_add", False):
+        st.session_state["reload_after_add"] = False
+        st.rerun()
+
+
+        # -------- 名簿編集 / 登録 --------
+    st.subheader("名簿の管理")
+
+    st.markdown("#### 新規メンバー追加")
+
+    with st.form("add_member_form", clear_on_submit=True):
+        new_emp_id = st.text_input("社員ID *", key="new_emp_id")
+        new_name = st.text_input("名前 *", key="new_emp_name")
+        new_grp = st.text_input("グループ *", key="new_emp_grp")
+
+        submitted_new = st.form_submit_button("この人を追加", type="primary")
+        if submitted_new:
+            emp_id_clean = new_emp_id.strip()
+            name_clean = new_name.strip()
+            grp_clean = new_grp.strip()
+
+            if not emp_id_clean or not name_clean or not grp_clean:
+                st.error("社員ID・名前・グループはすべて必須です。")
+            else:
+                try:
+                    with get_conn() as conn:
+                        conn.execute(
+                            "INSERT INTO roster(emp_id, name, grp) VALUES(?,?,?)",
+                            (emp_id_clean, name_clean, grp_clean)
+                        )
+
+                    st.success(f"{emp_id_clean} を追加しました。")
+
+                    # ← ここが大事
+                    # 追加したら設定ページを最新状態で描き直したいのでフラグを立てる
+                    st.session_state["refresh_settings"] = True
+
+                except Exception as e:
+                    st.error(f"追加できませんでした: {e}")
+
+    st.divider()
+
+    # -------- 入力履歴（当月）と修正 / 削除 --------
+    st.subheader("入力履歴（当月）と修正 / 削除")
+
+    this_month_start = date.today().replace(day=1)
+    rec_m = month_df(this_month_start)
+    if rec_m.empty:
+        st.caption("今月の入力はまだありません。")
+    else:
+        roster_map = get_roster_df().set_index("社員ID")
+        rec_view = rec_m.copy()
+        rec_view["名前"] = rec_view["emp_id"].map(roster_map["名前"])
+        rec_view["チーム"] = rec_view["grp"]
+        rec_view["ポイント"] = pd.to_numeric(rec_view["points"], errors="coerce").fillna(0.0)
+        rec_view["日付"] = pd.to_datetime(rec_view["d"]).dt.date
+
+        # 編集用のDataFrameに整形
+        edit_df = rec_view[["id", "日付", "emp_id", "名前", "チーム", "ポイント"]].rename(
+            columns={
+                "emp_id": "社員ID",
+                "チーム": "グループ",
+                "ポイント": "ポイント"
+            }
+        )
+
+        if "records_work" not in st.session_state:
+            st.session_state["records_work"] = edit_df.copy()
+
+        st.session_state["records_work"] = st.data_editor(
+            st.session_state["records_work"],
+            num_rows="fixed",
+            key="records_edit",
+            width="stretch"
+        )
+
+        # 削除対象のチェック
+        delete_ids = st.multiselect(
+            "削除したい行（id）を選択",
+            options=st.session_state["records_work"]["id"].tolist()
+        )
+
+        c_upd, c_del = st.columns(2)
+        with c_upd:
+            if st.button("修正を保存", type="primary", width="content"):
+                try:
+                    with get_conn() as conn:
+                        for _, row in st.session_state["records_work"].iterrows():
+                            rid = row["id"]
+                            new_date = row["日付"]
+                            new_emp = row["社員ID"]
+                            new_grp = row["グループ"]
+                            new_pts = float(row["ポイント"])
+
+                            # ロックされてる月はスキップ
+                            if is_locked(new_date):
+                                continue
+
+                            conn.execute(
+                                """
+                                UPDATE records
+                                SET d=?, emp_id=?, grp=?, points=?
+                                WHERE id=?
+                                """,
+                                (new_date.isoformat(), new_emp, new_grp, new_pts, rid)
+                            )
+                    st.success("修正を保存しました。")
+                except Exception as e:
+                    st.error(f"修正の保存でエラー: {e}")
+
+        with c_del:
+            if st.button("選択した行を削除", width="content"):
+                if delete_ids:
+                    try:
+                        with get_conn() as conn:
+                            rows_for_delete = st.session_state["records_work"][
+                                st.session_state["records_work"]["id"].isin(delete_ids)
+                            ]
+                            for _, row in rows_for_delete.iterrows():
+                                del_date = row["日付"]
+                                if not is_locked(del_date):
+                                    conn.execute("DELETE FROM records WHERE id=?", (row["id"],))
+                        st.success("削除しました。")
+                    except Exception as e:
+                        st.error(f"削除でエラー: {e}")
+                else:
+                    st.info("削除対象が選ばれていません。")
+
+    st.divider()
+
+    # -------- 月締めロック --------
+    st.subheader("月締めロック")
+    col_lock1, col_lock2 = st.columns(2)
+    with col_lock1:
+        lock_target = st.date_input("ロ締め・解除する月の1日を選択", value=date.today().replace(day=1))
+        if st.button("この月をロックする", width="content"):
+            lock_month(lock_target)
+            st.success("ロックしました。この月の新規入力や修正・削除はできません。")
+        if st.button("この月のロックを解除する", width="content"):
+            unlock_month(lock_target)
+            st.success("ロックを解除しました。修正・削除が可能になります。")
+
+    st.divider()
+
+    # -------- CSVバックアップ / 復元 --------
+    st.subheader("バックアップ / 復元")
+
+    with get_conn() as conn:
+        df_export = pd.read_sql_query(
+            "SELECT d, emp_id, grp, points, shift, memo FROM records ORDER BY d ASC",
+            conn
+        )
+
+    st.download_button(
+        "現在の全データをCSVダウンロード",
+        data=df_export.to_csv(index=False).encode("utf-8-sig"),
+        file_name="records_export.csv",
+        mime="text/csv"
+    )
+
+    # latest_backup.csv のダウンロード
+    if BACKUP_PATH.exists():
+        st.download_button(
+            "latest_backup.csv をダウンロード（自動バックアップ）",
+            data=BACKUP_PATH.read_bytes(),
+            file_name="latest_backup.csv"
+        )
+    else:
+        st.caption("latest_backup.csv はまだありません（誰かが画面を開くと自動で作られます）。")
+
+    st.subheader("CSVインポート（上書き復元）")
+    st.caption("latest_backup.csv または過去エクスポートしたCSVを使って復元できます。")
+
+    uploaded = st.file_uploader("CSVを選択して復元", type=["csv"])
+    if uploaded is not None:
+        if st.button("このCSVで上書き復元する", type="primary"):
+            try:
+                df_new = pd.read_csv(uploaded)
+
+                col_map = {
+                    "日付": "d",
+                    "社員ID": "emp_id",
+                    "チーム": "grp",
+                    "グループ": "grp",
+                    "ポイント": "points",
+                    "メモ": "memo",
+                    "シフト": "shift"
+                }
+                df_new = df_new.rename(columns=col_map)
+
+                need_cols = ["d", "emp_id", "grp", "points"]
+                for c in need_cols:
+                    if c not in df_new.columns:
+                        st.error(f"必要な列が足りません: {c}")
+                        st.stop()
+
+                if "shift" not in df_new.columns:
+                    df_new["shift"] = ""
+                if "memo" not in df_new.columns:
+                    df_new["memo"] = ""
+
+                df_new["points"] = pd.to_numeric(df_new["points"], errors="coerce").fillna(0.0)
+
+                with get_conn() as conn:
+                    conn.execute("DELETE FROM records")
+                    conn.executemany(
+                        """
+                        INSERT INTO records(d, emp_id, grp, points, shift, memo)
+                        VALUES(?,?,?,?,?,?)
+                        """,
+                        list(df_new[["d","emp_id","grp","points","shift","memo"]].itertuples(index=False, name=None))
+                    )
+                st.success("復元が完了しました。")
+                auto_backup_latest()
+            except Exception as e:
+                st.error(f"復元でエラーが発生しました: {e}")
+                
+        st.divider()
+    st.markdown("### ⚠️ データリセット")
+    st.caption("※ 名簿（社員ID・名前・チーム）はそのまま残ります。ポイント履歴だけ全削除します。")
+
+    if "confirm_wipe" not in st.session_state:
+        st.session_state["confirm_wipe"] = False
+
+    if st.button("全データをリセットする", type="secondary"):
+        st.session_state["confirm_wipe"] = True
+
+    if st.session_state["confirm_wipe"]:
+        st.warning(
+            "本当にすべての入力データ（ポイント履歴）を削除しますか？この操作は取り消せません。",
+            icon="⚠️"
+        )
+
+        col1, col2 = st.columns([1,1])
+
+        with col1:
+            if st.button("はい、削除します", type="primary", key="do_wipe"):
+                try:
                     with get_conn() as conn:
                         conn.execute("DELETE FROM records")
-                        conn.executemany(
-                        "INSERT INTO records(d, shift, emp_id, grp, points, memo) VALUES(?,?,?,?,?,?)",
-                        list(df_new[need].itertuples(index=False, name=None))
-                        )
-                    st.success("records をインポートしました。")
-            except Exception as e:
-                st.error(f"インポートに失敗しました: {e}")
+                    auto_backup_latest()
+
+                    # 状態リセット
+                    st.session_state["confirm_wipe"] = False
+
+                    # ✅ 新仕様：ページを更新して最新状態へ
+                    st.session_state["refresh_settings"] = True
+
+                    st.success("✅ 入力データをすべて削除しました。")
+
+                except Exception as e:
+                    st.error(f"削除中にエラーが発生しました: {e}")
+
+        with col2:
+            if st.button("キャンセル", type="secondary", key="cancel_wipe"):
+                st.session_state["confirm_wipe"] = False
+                st.success("キャンセルしました。")
+

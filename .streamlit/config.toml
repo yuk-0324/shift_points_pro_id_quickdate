@@ -1,0 +1,12 @@
+[browser]
+gatherUsageStats = false
+
+[theme]
+primaryColor = "#2e7d32"         # 緑っぽい
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F8F4"
+textColor = "#000000"
+font = "sans serif"
+
+[server]
+headless = true
