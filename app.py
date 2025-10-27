@@ -777,14 +777,13 @@ elif page == "設定":
 # =========================================================
 if __name__ == "__main__":
     import os
-    import sys
     import subprocess
 
-    # Render が割り当てるポート番号を使う（なければ10000にフォールバック）
+    # Render が割り当てたポート番号。ローカルで直接 python app.py したときは 10000 で動く
     port = os.environ.get("PORT", "10000")
 
-    # ここでサブプロセスとして streamlit を正しく起動する
-    # これにより「python app.py」→「内部で streamlit run app.py ...」という流れになる
+    # ここで現在のプロセスとは別に streamlit を正式起動する
+    # subprocess.run だと戻ってきて二重実行になるので、exec で置き換える
     cmd = [
         "streamlit",
         "run",
@@ -794,5 +793,6 @@ if __name__ == "__main__":
         "--server.address",
         "0.0.0.0",
     ]
-    # 置き換え：このプロセスをそのままStreamlitにバトンタッチする
+
     os.execvp(cmd[0], cmd)
+
