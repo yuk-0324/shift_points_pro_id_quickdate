@@ -771,15 +771,28 @@ elif page == "設定":
                 st.session_state["confirm_wipe"] = False
                 st.success("キャンセルしました。")
 
+
 # =========================================================
-# Render用: 起動エントリーポイント
+# Render用エントリーポイント
 # =========================================================
 if __name__ == "__main__":
     import os
-    import streamlit.web.cli as stcli
     import sys
+    import subprocess
 
-    # Renderが自動で渡すPORT番号を使用（デフォルト10000はローカル用）
-    port = int(os.environ.get("PORT", 10000))
-    sys.argv = ["streamlit", "run", "app.py", "--server.port", str(port), "--server.address", "0.0.0.0"]
-    sys.exit(stcli.main())
+    # Render が割り当てるポート番号を使う（なければ10000にフォールバック）
+    port = os.environ.get("PORT", "10000")
+
+    # ここでサブプロセスとして streamlit を正しく起動する
+    # これにより「python app.py」→「内部で streamlit run app.py ...」という流れになる
+    cmd = [
+        "streamlit",
+        "run",
+        "app.py",
+        "--server.port",
+        port,
+        "--server.address",
+        "0.0.0.0",
+    ]
+    # 置き換え：このプロセスをそのままStreamlitにバトンタッチする
+    os.execvp(cmd[0], cmd)
