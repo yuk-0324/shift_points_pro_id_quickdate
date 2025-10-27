@@ -772,27 +772,3 @@ elif page == "設定":
                 st.success("キャンセルしました。")
 
 
-# =========================================================
-# Render用エントリーポイント
-# =========================================================
-if __name__ == "__main__":
-    import os
-    import subprocess
-
-    # Render が割り当てたポート番号。ローカルで直接 python app.py したときは 10000 で動く
-    port = os.environ.get("PORT", "10000")
-
-    # ここで現在のプロセスとは別に streamlit を正式起動する
-    # subprocess.run だと戻ってきて二重実行になるので、exec で置き換える
-    cmd = [
-        "streamlit",
-        "run",
-        "app.py",
-        "--server.port",
-        port,
-        "--server.address",
-        "0.0.0.0",
-    ]
-
-    os.execvp(cmd[0], cmd)
-
