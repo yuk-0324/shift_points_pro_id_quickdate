@@ -597,7 +597,7 @@ elif page == "設定":
 
         c_upd, c_del = st.columns(2)
         with c_upd:
-            if st.button("修正を保存", type="primary", width="content"):
+            if st.button("修正を保存", type="primary"):
                 try:
                     with get_conn() as conn:
                         for _, row in st.session_state["records_work"].iterrows():
@@ -624,7 +624,7 @@ elif page == "設定":
                     st.error(f"修正の保存でエラー: {e}")
 
         with c_del:
-            if st.button("選択した行を削除", width="content"):
+            if st.button("選択した行を削除"):
                 if delete_ids:
                     try:
                         with get_conn() as conn:
@@ -648,10 +648,10 @@ elif page == "設定":
     col_lock1, col_lock2 = st.columns(2)
     with col_lock1:
         lock_target = st.date_input("ロ締め・解除する月の1日を選択", value=date.today().replace(day=1))
-        if st.button("この月をロックする", width="content"):
+        if st.button("この月をロックする"):
             lock_month(lock_target)
             st.success("ロックしました。この月の新規入力や修正・削除はできません。")
-        if st.button("この月のロックを解除する", width="content"):
+        if st.button("この月のロックを解除する"):
             unlock_month(lock_target)
             st.success("ロックを解除しました。修正・削除が可能になります。")
 
