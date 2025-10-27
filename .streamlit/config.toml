@@ -1,5 +1,6 @@
 [browser]
 gatherUsageStats = false
+serverAddress = "0.0.0.0"
 
 [theme]
 primaryColor = "#2e7d32"         # 緑っぽい
@@ -10,3 +11,7 @@ font = "sans serif"
 
 [server]
 headless = true
+enableXsrfProtection = false
+enableCORS = false
+address = "0.0.0.0"
+port = 10000
