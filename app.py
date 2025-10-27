@@ -272,36 +272,32 @@ if page == "入力":
         }
 
         # 日付の扱い
-        st.caption("日付は基本『今日』になります。必要なら昨日ボタンで変更。")
-        col_date_flags1, col_date_flags2, _ = st.columns([1,1,1])
+        st.caption("日付は基本『今日』になります。必要なら日付を指定してください。")
+        col_date_flags1, _ = st.columns([1,1])  # 列を2→1に変更
         with col_date_flags1:
             use_today = st.toggle("今日の日付で記録する", value=True)
-        with col_date_flags2:
-            yesterday_click = st.button("昨日で記録")
 
         with st.form("entry_form", clear_on_submit=True):
             c1, c2, c3 = st.columns([1,1,1])
             with c1:
-                # 日付ロジック
-                if yesterday_click:
-                    d_val = date.today() - timedelta(days=1)
-                elif use_today:
+        # 日付ロジック
+                if use_today:
                     d_val = date.today()
                 else:
                     d_val = st.date_input("日付 *", value=date.today())
 
-                selected_label = st.selectbox(
-                    "社員ID *（ID - 名前）",
-                    options=list(choices_map.keys()),
-                    index=0
-                )
-                emp_id = choices_map[selected_label]
+        # ✅ 社員ID手入力 + 名簿チェック
+                emp_id = st.text_input("社員ID").strip()
 
-                # グループ自動表示
-                grp_val = (
-                    roster.set_index("社員ID")
-                    .loc[emp_id, "グループ"]
-                )
+                if emp_id:
+                    if emp_id not in roster["社員ID"].astype(str).tolist():
+                        st.error("この社員IDは名簿に存在しません。設定画面で登録してください。")
+                        grp_val = ""
+                    else:
+                        grp_val = roster.set_index("社員ID").loc[emp_id, "グループ"]
+                else:
+                    grp_val = ""
+
                 st.text_input("チーム（自動）", value=grp_val, disabled=True)
 
             with c2:
@@ -314,28 +310,26 @@ if page == "入力":
                 )
 
             with c3:
-                st.write("")  # 余白
-                submit_btn = st.form_submit_button(
-                    "追加する",
-                    type="primary"
-                )
+                st.write("")
+                submit_btn = st.form_submit_button("追加する", type="primary")
 
             if submit_btn:
-                # 必須チェック
                 missing = []
-                if d_val is None:
+                if not d_val:
                     missing.append("日付")
                 if not emp_id:
                     missing.append("社員ID")
+                elif emp_id not in roster["社員ID"].astype(str).tolist():
+                    missing.append("社員ID（未登録）")
                 if point_val is None:
                     missing.append("ポイント")
 
                 if missing:
-                    st.error("必須項目が未入力: " + ", ".join(missing))
+                    st.error("必須項目が未入力または不正: " + ", ".join(missing))
                 else:
                     ok = add_record(d_val, emp_id, point_val)
                     if ok:
-                        st.success(f"追加しました！（{d_val} / {selected_label} / {point_val:.1f}pt）")
+                        st.success(f"追加しました！（{d_val} / {emp_id} / {point_val:.1f}pt）")
 
     # 入力画面では最近ログは表示しない（店員が見れないようにする）
 
@@ -358,8 +352,8 @@ elif page == "順位":
             # デフォルトは今月末の次の日
             end_default = (
                 _dt.date(today.year + (today.month == 12),
-                         (today.month % 12) + 1,
-                         1)
+                        (today.month % 12) + 1,
+                        1)
             )
             end_date = st.date_input("終了日（翌日でも可）", value=end_default)
 
