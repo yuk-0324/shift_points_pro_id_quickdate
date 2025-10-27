@@ -771,3 +771,15 @@ elif page == "設定":
                 st.session_state["confirm_wipe"] = False
                 st.success("キャンセルしました。")
 
+# =========================================================
+# Render用: 起動エントリーポイント
+# =========================================================
+if __name__ == "__main__":
+    import os
+    import streamlit.web.cli as stcli
+    import sys
+
+    # Renderが自動で渡すPORT番号を使用（デフォルト10000はローカル用）
+    port = int(os.environ.get("PORT", 10000))
+    sys.argv = ["streamlit", "run", "app.py", "--server.port", str(port), "--server.address", "0.0.0.0"]
+    sys.exit(stcli.main())
