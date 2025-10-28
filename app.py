@@ -361,21 +361,18 @@ elif page == "順位":
     
         # --- 店舗共有パス認証 ---
 
-    if "store_ok" not in st.session_state:
-        st.session_state["store_ok"] = False
+    # --- パスワード入力UI ---
+    with st.form("rank_auth_form", clear_on_submit=False):
+        st.write("この画面を見るには店舗用パスワードが必要です。")
+        pw_try = st.text_input("パスワード", type="password")
+        auth_btn = st.form_submit_button("表示する")
 
-    if not st.session_state["store_ok"]:
-        with st.expander("店舗パスワード認証", expanded=True):
-            store_try = st.text_input("店舗共有パスワード", type="password")
-            if st.button("認証する", type="primary"):
-                if store_try == STORE_PASS:
-                    st.session_state["store_ok"] = True
-                    st.success("認証OK")
-                else:
-                    st.error("パスワードが違います")
-
-        if not st.session_state["store_ok"]:
-            st.stop()
+    # パスが間違ってる or 未入力 → ここで止める
+    if not auth_btn:
+        st.stop()
+    if pw_try != STORE_PASS:
+        st.error("パスワードが違います。")
+        st.stop()
 
 
     presets = ["今日", "今週", "今月", "先月", "カスタム"]
@@ -481,21 +478,17 @@ elif page == "名簿":
     st.header("名簿（閲覧専用）")
         # --- 店舗共有パス認証 ---
 
-    if "store_ok" not in st.session_state:
-        st.session_state["store_ok"] = False
+    with st.form("roster_auth_form", clear_on_submit=False):
+        st.write("この画面を見るには店舗用パスワードが必要です。")
+        pw_try = st.text_input("パスワード", type="password")
+        auth_btn = st.form_submit_button("表示する")
 
-    if not st.session_state["store_ok"]:
-        with st.expander("店舗パスワード認証", expanded=True):
-            store_try = st.text_input("店舗共有パスワード", type="password")
-            if st.button("認証する", type="primary"):
-                if store_try == STORE_PASS:
-                    st.session_state["store_ok"] = True
-                    st.success("認証OK")
-                else:
-                    st.error("パスワードが違います")
-
-        if not st.session_state["store_ok"]:
-            st.stop()
+    # パスが間違ってる or 未入力 → ここで止める
+    if not auth_btn:
+        st.stop()
+    if pw_try != STORE_PASS:
+        st.error("パスワードが違います。")
+        st.stop()
 
 
     roster = get_roster_df()  # 社員ID, 名前, グループ
