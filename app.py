@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 # =========================================================
 load_dotenv()
 ADMIN_PIN = os.getenv("ADMIN_PIN", "329865")  # PIN
+STORE_PASS = os.getenv("STORE_PASS", "000113")
 
 st.set_page_config(
     page_title="B-POINT選手権 ☕",
@@ -163,29 +164,40 @@ def add_record(d: date, emp_id: str, points: float):
     # rosterからグループ確認
     roster = get_roster_df().set_index("社員ID")
     if emp_id not in roster.index:
-        st.error("その社員IDは名簿にありません（設定→名簿編集で登録してください）")
+        st.error("その社員IDは存在しません")
         return False
     grp = roster.loc[emp_id, "グループ"]
 
-    # 重複(同じ日×同じ人)チェック
     with get_conn() as conn:
+        # 同日・同社員のデータがあるか確認
         exists = conn.execute(
-            "SELECT 1 FROM records WHERE d=? AND emp_id=?",
+            "SELECT id FROM records WHERE d=? AND emp_id=?",
             (d.isoformat(), emp_id)
         ).fetchone()
-        if exists:
-            st.warning("この人はこの日にすでに登録済みです。")
-            return False
 
-        # shiftとmemoは今後使わないので空文字を入れる
-        conn.execute(
-            """
-            INSERT INTO records(d, emp_id, grp, points, shift, memo)
-            VALUES(?,?,?,?,?,?)
-            """,
-            (d.isoformat(), emp_id, grp, float(points), "", "")
-        )
+        if exists:
+            # 既存データを上書き（ポイントとグループを更新）
+            conn.execute(
+                """
+                UPDATE records
+                SET grp=?, points=?
+                WHERE d=? AND emp_id=?
+                """,
+                (grp, float(points), d.isoformat(), emp_id)
+            )
+            st.info("本日のポイントを上書きしました。")
+        else:
+            # 新規登録
+            conn.execute(
+                """
+                INSERT INTO records(d, emp_id, grp, points, shift, memo)
+                VALUES(?,?,?,?,?,?)
+                """,
+                (d.isoformat(), emp_id, grp, float(points), "", "")
+            )
+
     return True
+
 
 
 # =========================================================
@@ -258,7 +270,14 @@ page = st.sidebar.radio(
 # =========================================================
 # ページ1: 入力（スタッフ用）
 # =========================================================
+
 if page == "入力":
+    # メインタイトル（中央寄せ）
+    st.markdown(
+        "<h1 style='text-align: center; font-size: 42px;'>B-POINT選手権 ☕</h1>",
+        unsafe_allow_html=True
+    )
+
     st.header("入力")
 
     roster = get_roster_df()
@@ -291,7 +310,7 @@ if page == "入力":
 
                 if emp_id:
                     if emp_id not in roster["社員ID"].astype(str).tolist():
-                        st.error("この社員IDは名簿に存在しません。設定画面で登録してください。")
+                        st.error("この社員IDは存在しません。")
                         grp_val = ""
                     else:
                         grp_val = roster.set_index("社員ID").loc[emp_id, "グループ"]
@@ -339,6 +358,25 @@ if page == "入力":
 # =========================================================
 elif page == "順位":
     st.header("順位")
+    
+        # --- 店舗共有パス認証 ---
+
+    if "store_ok" not in st.session_state:
+        st.session_state["store_ok"] = False
+
+    if not st.session_state["store_ok"]:
+        with st.expander("店舗パスワード認証", expanded=True):
+            store_try = st.text_input("店舗共有パスワード", type="password")
+            if st.button("認証する", type="primary"):
+                if store_try == STORE_PASS:
+                    st.session_state["store_ok"] = True
+                    st.success("認証OK")
+                else:
+                    st.error("パスワードが違います")
+
+        if not st.session_state["store_ok"]:
+            st.stop()
+
 
     presets = ["今日", "今週", "今月", "先月", "カスタム"]
     preset = st.radio("期間", presets, horizontal=True, index=2)  # デフォルト今月
@@ -441,6 +479,24 @@ elif page == "順位":
 # =========================================================
 elif page == "名簿":
     st.header("名簿（閲覧専用）")
+        # --- 店舗共有パス認証 ---
+
+    if "store_ok" not in st.session_state:
+        st.session_state["store_ok"] = False
+
+    if not st.session_state["store_ok"]:
+        with st.expander("店舗パスワード認証", expanded=True):
+            store_try = st.text_input("店舗共有パスワード", type="password")
+            if st.button("認証する", type="primary"):
+                if store_try == STORE_PASS:
+                    st.session_state["store_ok"] = True
+                    st.success("認証OK")
+                else:
+                    st.error("パスワードが違います")
+
+        if not st.session_state["store_ok"]:
+            st.stop()
+
 
     roster = get_roster_df()  # 社員ID, 名前, グループ
     totals = get_total_points_by_emp()  # 社員ID, 累計ポイント
@@ -467,7 +523,7 @@ elif page == "名簿":
         )
 
         st.dataframe(
-            merged[["社員ID", "名前", "グループ", "累計ポイント"]],
+            merged[["名前", "グループ", "累計ポイント"]],
             hide_index=True
         )
 
