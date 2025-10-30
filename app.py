@@ -14,16 +14,20 @@ load_dotenv()
 ADMIN_PIN = os.getenv("ADMIN_PIN", "329865")  # PIN
 STORE_PASS = os.getenv("STORE_PASS", "000113")
 
+IS_RENDER = bool(os.getenv("RENDER"))  # Renderでは RENDER 環境変数が入ります
+DATA_DIR  = Path("/data" if IS_RENDER else "data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_PATH     = DATA_DIR / "app.db"              # ← SQLite の保存先（永続化）
+BACKUP_PATH = DATA_DIR / "latest_backup.csv"   # ← バックアップCSVの保存先（永続化）
+
+
+
 st.set_page_config(
     page_title="B-POINT選手権 ☕",
     layout="wide"
 )
 
-BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-DB_PATH = DATA_DIR / "app.db"
-BACKUP_PATH = DATA_DIR / "latest_backup.csv"  # 最新バックアップ1本だけ保持
 
 
 # =========================================================
@@ -466,7 +470,7 @@ elif page == "順位":
             for i, row in sub.iterrows():
                 rank_num = i + 1
                 st.write(
-                    f"{rank_num}位: {row['名前']}（{row['emp_id']}） - {row['個人合計']:.1f} pt"
+                    f"{rank_num}位: {row['名前']} - {row['個人合計']:.1f} pt"
                 )
             st.write("---")
 
@@ -476,8 +480,8 @@ elif page == "順位":
 # =========================================================
 elif page == "名簿":
     st.header("名簿（閲覧専用）")
-        # --- 店舗共有パス認証 ---
 
+    # --- 店舗共有パス認証 ---
     with st.form("roster_auth_form", clear_on_submit=False):
         st.write("この画面を見るには店舗用パスワードが必要です。")
         pw_try = st.text_input("パスワード", type="password")
@@ -490,30 +494,53 @@ elif page == "名簿":
         st.error("パスワードが違います。")
         st.stop()
 
+    # --- 期間フィルタ UI ---
+    st.divider()
+    st.subheader("📅 期間指定（任意）")
+    c1, c2, c3 = st.columns([1,1,1])
+    with c1:
+        use_period = st.toggle("期間で絞り込み", value=False)
+    with c2:
+        start_date = st.date_input("開始日", value=date.today().replace(day=1))
+    with c3:
+        end_date = st.date_input("終了日", value=date.today())
+
+    if use_period and start_date > end_date:
+        st.warning("開始日が終了日より後になっています。日付を見直してください。")
+        st.stop()
 
     roster = get_roster_df()  # 社員ID, 名前, グループ
-    totals = get_total_points_by_emp()  # 社員ID, 累計ポイント
+
+    # --- 期間で合計を作る or 全期間の累計を使う ---
+    if use_period:
+        rec_df = get_records_df()  # d, 社員ID, グループ, ポイント, ...
+        if rec_df.empty:
+            totals = pd.DataFrame({"社員ID": [], "累計ポイント": []})
+        else:
+            rec_df["d"] = pd.to_datetime(rec_df["d"])
+            mask = (rec_df["d"] >= pd.Timestamp(start_date)) & (rec_df["d"] <= pd.Timestamp(end_date))
+            rec_period = rec_df.loc[mask]
+
+            if rec_period.empty:
+                totals = pd.DataFrame({"社員ID": [], "累計ポイント": []})
+            else:
+                totals = (rec_period
+                          .groupby("社員ID", as_index=False)["ポイント"]
+                          .sum()
+                          .rename(columns={"ポイント": "累計ポイント"}))
+    else:
+        # 既存の全期間累計を使う（あなたのヘルパー関数）
+        totals = get_total_points_by_emp()  # 社員ID, 累計ポイント
 
     if roster.empty:
         st.info("まだ名簿がありません（設定→名簿編集で登録してください）")
     else:
-        # 累計ポイントを結合
-        merged = pd.merge(
-            roster,
-            totals,
-            on="社員ID",
-            how="left"
-        )
-        merged["累計ポイント"] = pd.to_numeric(
-            merged["累計ポイント"],
-            errors="coerce"
-        ).fillna(0.0)
+        # 累計ポイントを結合（見せるのは 名前/グループ/累計ポイント のみ）
+        merged = pd.merge(roster, totals, on="社員ID", how="left")
+        merged["累計ポイント"] = pd.to_numeric(merged["累計ポイント"], errors="coerce").fillna(0.0)
 
-        # 見やすい並び順: グループ→ポイント降順→社員ID
-        merged = merged.sort_values(
-            by=["グループ", "累計ポイント"],
-            ascending=[True, False]
-        )
+        # 見やすい並び順: グループ → ポイント降順
+        merged = merged.sort_values(by=["グループ", "累計ポイント"], ascending=[True, False])
 
         st.dataframe(
             merged[["名前", "グループ", "累計ポイント"]],
@@ -597,6 +624,65 @@ elif page == "設定":
                 except Exception as e:
                     st.error(f"追加できませんでした: {e}")
 
+    st.divider()
+    
+    # === 名簿 編集・削除 ===
+    st.markdown("#### 名簿の編集 / 削除")
+
+# 現在の名簿を取得（社員ID・名前・グループ）
+    roster_df = get_roster_df().rename(columns={"社員ID":"emp_id","名前":"name","グループ":"grp"})
+
+    if roster_df.empty:
+        st.caption("まだ名簿がありません。先に新規追加してください。")
+    else:
+        # 編集用ワークコピーをセッションに保持（編集中に消えないように）
+        if "roster_work" not in st.session_state:
+            st.session_state["roster_work"] = roster_df.copy()
+
+        st.session_state["roster_work"] = st.data_editor(
+            st.session_state["roster_work"],
+            num_rows="fixed",
+            key="roster_editor",
+            # 社員IDは基本変えない想定なら True で保護（変えるなら False）
+            column_config={
+                "emp_id": st.column_config.Column("社員ID", disabled=True),
+                "name":   st.column_config.Column("名前"),
+                "grp":    st.column_config.Column("グループ"),
+            }
+        )
+
+        col_upd, col_del = st.columns(2)
+        with col_upd:
+            if st.button("名簿の編集内容を保存", type="primary", key="save_roster_edit"):
+                try:
+                    with get_conn() as conn:
+                        for _, row in st.session_state["roster_work"].iterrows():
+                            conn.execute(
+                                "UPDATE roster SET name=?, grp=? WHERE emp_id=?",
+                                (row["name"].strip(), row["grp"].strip(), row["emp_id"].strip())
+                            )
+                    st.success("名簿を更新しました。")
+                    st.session_state["refresh_settings"] = True
+                except Exception as e:
+                    st.error(f"名簿更新でエラー: {e}")
+
+        with col_del:
+            del_targets = st.multiselect(
+                "削除する社員IDを選択",
+                options=st.session_state["roster_work"]["emp_id"].tolist()
+            )
+            if st.button("選択した人を削除", key="del_roster_btn"):
+                if del_targets:
+                    try:
+                        with get_conn() as conn:
+                            for emp in del_targets:
+                                conn.execute("DELETE FROM roster WHERE emp_id=?", (emp,))
+                        st.success("削除しました。")
+                        st.session_state["refresh_settings"] = True
+                    except Exception as e:
+                        st.error(f"削除でエラー: {e}")
+                else:
+                    st.info("削除対象が選ばれていません。")
     st.divider()
 
     # -------- 入力履歴（当月）と修正 / 削除 --------
