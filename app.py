@@ -269,6 +269,21 @@ page = st.sidebar.radio(
     ["入力", "順位", "名簿", "設定"],
     index=0
 )
+# 初期化（なければ）
+for k in ("rank_ok", "roster_ok", "admin_ok"):
+    st.session_state.setdefault(k, False)
+# --- ページ切り替えで認証をリセット ---
+if "last_page" not in st.session_state:
+    st.session_state["last_page"] = page
+
+if st.session_state["last_page"] != page:
+    # ページが変わったら閲覧系の認証をリセット
+    st.session_state["rank_ok"] = False
+    st.session_state["roster_ok"] = False
+    # （設定ページを毎回要求したいなら↓もFalseに）
+    st.session_state["admin_ok"] = False
+
+    st.session_state["last_page"] = page
 
 
 # =========================================================
@@ -366,17 +381,23 @@ elif page == "順位":
         # --- 店舗共有パス認証 ---
 
     # --- パスワード入力UI ---
-    with st.form("rank_auth_form", clear_on_submit=False):
-        st.write("この画面を見るには店舗用パスワードが必要です。")
-        pw_try = st.text_input("パスワード", type="password")
-        auth_btn = st.form_submit_button("表示する")
+    # 認証フラグが立ってなければフォームを表示
+    if not st.session_state.get("rank_ok", False):
+        with st.form("rank_auth_form", clear_on_submit=False):
+            st.write("この画面を見るには店舗用パスワードが必要です。")
+            pw_try = st.text_input("店舗共有パスワード", type="password")
+            ok = st.form_submit_button("表示する", type="primary")
 
-    # パスが間違ってる or 未入力 → ここで止める
-    if not auth_btn:
-        st.stop()
-    if pw_try != STORE_PASS:
-        st.error("パスワードが違います。")
-        st.stop()
+        if not ok:
+            st.stop()
+
+        if pw_try != STORE_PASS:
+            st.error("パスワードが違います。")
+            st.stop()
+
+        # 認証成功 → フラグを立ててページ再描画（以後は保持）
+        st.session_state["rank_ok"] = True
+        st.rerun()
 
 
     presets = ["今日", "今週", "今月", "先月", "カスタム"]
@@ -482,17 +503,21 @@ elif page == "名簿":
     st.header("名簿（閲覧専用）")
 
     # --- 店舗共有パス認証 ---
-    with st.form("roster_auth_form", clear_on_submit=False):
-        st.write("この画面を見るには店舗用パスワードが必要です。")
-        pw_try = st.text_input("パスワード", type="password")
-        auth_btn = st.form_submit_button("表示する")
+    if not st.session_state.get("roster_ok", False):
+        with st.form("roster_auth_form", clear_on_submit=False):
+            st.write("この画面を見るには店舗用パスワードが必要です。")
+            pw_try = st.text_input("店舗共有パスワード", type="password")
+            ok = st.form_submit_button("表示する", type="primary")
 
-    # パスが間違ってる or 未入力 → ここで止める
-    if not auth_btn:
-        st.stop()
-    if pw_try != STORE_PASS:
-        st.error("パスワードが違います。")
-        st.stop()
+        if not ok:
+            st.stop()
+
+        if pw_try != STORE_PASS:
+            st.error("パスワードが違います。")
+            st.stop()
+
+        st.session_state["roster_ok"] = True
+        st.rerun()
 
     # --- 期間フィルタ UI ---
     st.divider()
@@ -563,23 +588,20 @@ elif page == "設定":
         st.rerun()
 
     # ---- PIN認証をセッションで保持 ----
-    if "admin_ok" not in st.session_state:
-        st.session_state["admin_ok"] = False
-
-    if not st.session_state["admin_ok"]:
-        with st.expander("PIN認証", expanded=True):
+    if not st.session_state.get("admin_ok", False):
+        with st.form("admin_auth_form", clear_on_submit=False):
             pin_try = st.text_input("管理PIN", type="password", placeholder="****")
-            if st.button("認証する", type="primary"):
-                if pin_try == ADMIN_PIN:
-                    st.session_state["admin_ok"] = True
-                    st.success("認証OK")
-                else:
-                    st.error("PINが違います")
+            ok = st.form_submit_button("表示する", type="primary")
 
-        if not st.session_state["admin_ok"]:
-            st.info("名簿の編集・入力履歴の修正・バックアップ復元などはPINが必要です。")
+        if not ok:
             st.stop()
+        if pin_try != ADMIN_PIN:
+            st.error("PINが違います。"); st.stop()
 
+        st.session_state["admin_ok"] = True
+        st.rerun()   # ← これで再描画して以後は認証済みのまま
+
+    st.success("管理者認証OK ✅")
 
     # ← ここからは「PIN通った人だけ」が実行されるゾーン
 
