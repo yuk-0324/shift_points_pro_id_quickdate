@@ -651,142 +651,199 @@ elif page == "設定":
     # === 名簿 編集・削除 ===
     st.markdown("#### 名簿の編集 / 削除")
 
-# 現在の名簿を取得（社員ID・名前・グループ）
-    roster_df = get_roster_df().rename(columns={"社員ID":"emp_id","名前":"name","グループ":"grp"})
+# 最新の名簿を毎回取得（社員ID, 名前, グループ）
+    roster_df = get_roster_df().rename(columns={"社員ID": "emp_id", "名前": "name", "グループ": "grp"})
 
     if roster_df.empty:
         st.caption("まだ名簿がありません。先に新規追加してください。")
     else:
-        # 編集用ワークコピーをセッションに保持（編集中に消えないように）
-        if "roster_work" not in st.session_state:
-            st.session_state["roster_work"] = roster_df.copy()
+    # 編集用にコピー（index連番にして安定）
+        base_df = roster_df.reset_index(drop=True).copy()
 
-        st.session_state["roster_work"] = st.data_editor(
-            st.session_state["roster_work"],
-            num_rows="fixed",
-            key="roster_editor",
-            # 社員IDは基本変えない想定なら True で保護（変えるなら False）
+        edited_df = st.data_editor(
+            base_df,
+            num_rows="fixed",  # 行数は固定（追加/削除は別UIで）
+            key="roster_editor_v2",
             column_config={
-                "emp_id": st.column_config.Column("社員ID", disabled=True),
+                "emp_id": st.column_config.Column("社員ID", disabled=True),  # IDは通常固定
                 "name":   st.column_config.Column("名前"),
                 "grp":    st.column_config.Column("グループ"),
             }
         )
 
         col_upd, col_del = st.columns(2)
+
+        # 変更点だけUPDATE（全件UPDATEでもOKだが効率のため差分検出）
         with col_upd:
-            if st.button("名簿の編集内容を保存", type="primary", key="save_roster_edit"):
+            if st.button("名簿の編集内容を保存", type="primary", key="save_roster_edit_v2"):
                 try:
-                    with get_conn() as conn:
-                        for _, row in st.session_state["roster_work"].iterrows():
-                            conn.execute(
-                                "UPDATE roster SET name=?, grp=? WHERE emp_id=?",
-                                (row["name"].strip(), row["grp"].strip(), row["emp_id"].strip())
-                            )
-                    st.success("名簿を更新しました。")
-                    st.session_state["refresh_settings"] = True
+                    # 差分検出：emp_idごとに name/grp の変更がある行だけ抽出
+                    merged = base_df.merge(
+                        edited_df, on="emp_id", suffixes=("_old", "_new"), how="outer", validate="one_to_one"
+                    )
+
+                    # 更新対象 = name or grp が変わった行
+                    need_update = merged[
+                        (merged["name_old"] != merged["name_new"]) | (merged["grp_old"] != merged["grp_new"])
+                    ][["emp_id", "name_new", "grp_new"]].rename(columns={"name_new": "name", "grp_new": "grp"})
+
+                    if need_update.empty:
+                        st.info("更新はありません。")
+                    else:
+                        with get_conn() as conn:
+                            for _, row in need_update.iterrows():
+                                conn.execute(
+                                    "UPDATE roster SET name=?, grp=? WHERE emp_id=?",
+                                    (str(row["name"]).strip(), str(row["grp"]).strip(), str(row["emp_id"]).strip())
+                                )
+                        st.success(f"{len(need_update)} 件更新しました。")
+                        st.rerun()
                 except Exception as e:
                     st.error(f"名簿更新でエラー: {e}")
 
+    # 削除は明示的に選んだIDを消す
         with col_del:
             del_targets = st.multiselect(
                 "削除する社員IDを選択",
-                options=st.session_state["roster_work"]["emp_id"].tolist()
+                options=base_df["emp_id"].tolist(),
+                key="del_roster_ids_v2"
             )
-            if st.button("選択した人を削除", key="del_roster_btn"):
+            if st.button("選択した人を削除", key="del_roster_btn_v2"):
                 if del_targets:
                     try:
                         with get_conn() as conn:
                             for emp in del_targets:
-                                conn.execute("DELETE FROM roster WHERE emp_id=?", (emp,))
+                                conn.execute("DELETE FROM roster WHERE emp_id=?", (str(emp).strip(),))
                         st.success("削除しました。")
-                        st.session_state["refresh_settings"] = True
+                        st.rerun()
                     except Exception as e:
                         st.error(f"削除でエラー: {e}")
                 else:
                     st.info("削除対象が選ばれていません。")
+
     st.divider()
 
     # -------- 入力履歴（当月）と修正 / 削除 --------
-    st.subheader("入力履歴（当月）と修正 / 削除")
+    st.markdown("#### 入力履歴の修正 / 削除")
 
-    this_month_start = date.today().replace(day=1)
-    rec_m = month_df(this_month_start)
-    if rec_m.empty:
-        st.caption("今月の入力はまだありません。")
+# 期間フィルタ（任意）
+    f1, f2, f3 = st.columns([1,1,1])
+    with f1:
+        use_period_hist = st.toggle("期間で絞り込み（履歴）", value=False)
+    with f2:
+        hist_start = st.date_input("開始日（履歴）", value=date.today().replace(day=1))
+    with f3:
+        hist_end = st.date_input("終了日（履歴）", value=date.today())
+    if use_period_hist and hist_start > hist_end:
+        st.warning("開始日が終了日より後です。")
+        st.stop()
+
+# ---- 毎回DBから最新を読む（セッションにDFを保持しない）----
+    with get_conn() as conn:
+        df_hist = pd.read_sql_query(
+            "SELECT id, d, emp_id, grp, points, shift, memo FROM records ORDER BY d DESC, id DESC",
+            conn
+        )
+
+    if use_period_hist and not df_hist.empty:
+        df_hist["d"] = pd.to_datetime(df_hist["d"])
+        mask = (df_hist["d"] >= pd.Timestamp(hist_start)) & (df_hist["d"] <= pd.Timestamp(hist_end))
+        df_hist = df_hist.loc[mask]
+    # 表示体裁を戻す（文字列にする場合）
+        df_hist["d"] = df_hist["d"].dt.date.astype(str)
+
+    if df_hist.empty:
+        st.caption("履歴がありません。")
     else:
-        roster_map = get_roster_df().set_index("社員ID")
-        rec_view = rec_m.copy()
-        rec_view["名前"] = rec_view["emp_id"].map(roster_map["名前"])
-        rec_view["チーム"] = rec_view["grp"]
-        rec_view["ポイント"] = pd.to_numeric(rec_view["points"], errors="coerce").fillna(0.0)
-        rec_view["日付"] = pd.to_datetime(rec_view["d"]).dt.date
+    # 表示/編集用の基準DF
+        base_rec = df_hist.reset_index(drop=True).copy()
 
-        # 編集用のDataFrameに整形
-        edit_df = rec_view[["id", "日付", "emp_id", "名前", "チーム", "ポイント"]].rename(
-            columns={
-                "emp_id": "社員ID",
-                "チーム": "グループ",
-                "ポイント": "ポイント"
+    # 編集させたい列だけ編集可にする（idは固定）
+        edited_rec = st.data_editor(
+            base_rec,
+            num_rows="fixed",
+            key="records_editor_v2",
+            column_config={
+                "id":     st.column_config.Column("ID", disabled=True),
+                "d":      st.column_config.Column("日付(YYYY-MM-DD)"),
+                "emp_id": st.column_config.Column("社員ID"),  # 変えさせたくなければ disabled=True
+                "grp":    st.column_config.Column("グループ"),
+                "points": st.column_config.NumberColumn("ポイント", step=0.5),
+                "shift":  st.column_config.Column("シフト"),
+                "memo":   st.column_config.Column("メモ"),
             }
         )
 
-        if "records_work" not in st.session_state:
-            st.session_state["records_work"] = edit_df.copy()
-
-        st.session_state["records_work"] = st.data_editor(
-            st.session_state["records_work"],
-            num_rows="fixed",
-            key="records_edit"
-        )
-
-        # 削除対象のチェック
-        delete_ids = st.multiselect(
-            "削除したい行（id）を選択",
-            options=st.session_state["records_work"]["id"].tolist()
-        )
-
         c_upd, c_del = st.columns(2)
+
+    # ---------------- 更新（差分だけ UPDATE） ----------------
         with c_upd:
-            if st.button("修正を保存", type="primary"):
+            if st.button("履歴の変更を保存", type="primary", key="save_hist_edit"):
                 try:
-                    with get_conn() as conn:
-                        for _, row in st.session_state["records_work"].iterrows():
-                            rid = row["id"]
-                            new_date = row["日付"]
-                            new_emp = row["社員ID"]
-                            new_grp = row["グループ"]
-                            new_pts = float(row["ポイント"])
+                    merged = base_rec.merge(
+                        edited_rec, on="id", suffixes=("_old", "_new"), how="inner", validate="one_to_one"
+                    )
+                # 変更検知（必要な列だけ比較）
+                    changed = merged[
+                        (merged["d_old"]      != merged["d_new"])  |
+                        (merged["emp_id_old"] != merged["emp_id_new"]) |
+                        (merged["grp_old"]    != merged["grp_new"]) |
+                        (merged["points_old"] != merged["points_new"]) |
+                        (merged["shift_old"]  != merged["shift_new"]) |
+                        (merged["memo_old"]   != merged["memo_new"])
+                    ][["id","d_new","emp_id_new","grp_new","points_new","shift_new","memo_new"]].rename(
+                        columns={
+                            "d_new":"d", "emp_id_new":"emp_id", "grp_new":"grp",
+                            "points_new":"points", "shift_new":"shift", "memo_new":"memo"
+                        }
+                    )
 
-                            # ロックされてる月はスキップ
-                            if is_locked(new_date):
-                                continue
+                    if changed.empty:
+                        st.info("更新はありません。")
+                    else:
+                        # バリデーション（例：emp_id が roster に存在するか）
+                        valid_emp = set(get_roster_df()["社員ID"].tolist())
+                        bad_emp = [e for e in changed["emp_id"].tolist() if e not in valid_emp]
+                        if bad_emp:
+                            st.error(f"未登録の社員IDが含まれています: {bad_emp}")
+                            st.stop()
 
-                            conn.execute(
-                                """
-                                UPDATE records
-                                SET d=?, emp_id=?, grp=?, points=?
-                                WHERE id=?
-                                """,
-                                (new_date.isoformat(), new_emp, new_grp, new_pts, rid)
-                            )
-                    st.success("修正を保存しました。")
+                    # 日付形式の軽いチェック
+                        for d_str in changed["d"].tolist():
+                            try:
+                                _ = pd.to_datetime(d_str).date()
+                            except Exception:
+                                st.error(f"日付形式が不正です: {d_str}")
+                                st.stop()
+
+                        with get_conn() as conn:
+                            for _, r in changed.iterrows():
+                                conn.execute("""
+                                    UPDATE records
+                                       SET d=?, emp_id=?, grp=?, points=?, shift=?, memo=?
+                                     WHERE id=?
+                                """, (str(r["d"]).strip(), str(r["emp_id"]).strip(), str(r["grp"]).strip(),
+                                      float(r["points"]), str(r["shift"]).strip(), str(r["memo"]).strip(), int(r["id"])))
+                        st.success(f"{len(changed)} 件更新しました。")
+                        st.rerun()
                 except Exception as e:
-                    st.error(f"修正の保存でエラー: {e}")
+                    st.error(f"履歴更新でエラー: {e}")
 
+    # ---------------- 削除（選択した id を DELETE） ----------------
         with c_del:
-            if st.button("選択した行を削除"):
-                if delete_ids:
+            del_ids = st.multiselect(
+                "削除するIDを選択（複数可）",
+                options=base_rec["id"].tolist(),
+                key="del_hist_ids_v2"
+            )
+            if st.button("選択した履歴を削除", key="del_hist_btn_v2"):
+                if del_ids:
                     try:
                         with get_conn() as conn:
-                            rows_for_delete = st.session_state["records_work"][
-                                st.session_state["records_work"]["id"].isin(delete_ids)
-                            ]
-                            for _, row in rows_for_delete.iterrows():
-                                del_date = row["日付"]
-                                if not is_locked(del_date):
-                                    conn.execute("DELETE FROM records WHERE id=?", (row["id"],))
+                            for rid in del_ids:
+                                conn.execute("DELETE FROM records WHERE id=?", (int(rid),))
                         st.success("削除しました。")
+                        st.rerun()
                     except Exception as e:
                         st.error(f"削除でエラー: {e}")
                 else:
