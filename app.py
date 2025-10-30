@@ -598,8 +598,7 @@ elif page == "名簿":
 
         st.dataframe(
             merged[["名前", "グループ", "累計ポイント"]],
-            hide_index=True,
-            width="stretch"   # use_container_width の代替
+            hide_index=True,  
         )
 
     st.caption("編集や新規登録は「設定」からのみできます。")
