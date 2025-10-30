@@ -502,7 +502,7 @@ elif page == "順位":
 elif page == "名簿":
     st.header("名簿（閲覧専用）")
 
-    # --- 店舗共有パス認証 ---
+    # --- 店舗共有パス認証（ページ内保持） ---
     if not st.session_state.get("roster_ok", False):
         with st.form("roster_auth_form", clear_on_submit=False):
             st.write("この画面を見るには店舗用パスワードが必要です。")
@@ -534,28 +534,57 @@ elif page == "名簿":
         st.warning("開始日が終了日より後になっています。日付を見直してください。")
         st.stop()
 
+    # --- 並び順 UI（ポイント降順/昇順） ---
+    sort_choice = st.radio(
+        "表示順",
+        ["ポイント高い順", "ポイント低い順"],
+        horizontal=True,
+        index=0
+    )
+    sort_ascending = (sort_choice == "ポイント低い順")
+
     roster = get_roster_df()  # 社員ID, 名前, グループ
 
     # --- 期間で合計を作る or 全期間の累計を使う ---
     if use_period:
-        rec_df = get_records_df()  # d, 社員ID, グループ, ポイント, ...
+        rec_df = get_records_df()  # d, emp_id/grp/points ... or 日本語列
         if rec_df.empty:
             totals = pd.DataFrame({"社員ID": [], "累計ポイント": []})
         else:
-            rec_df["d"] = pd.to_datetime(rec_df["d"])
-            mask = (rec_df["d"] >= pd.Timestamp(start_date)) & (rec_df["d"] <= pd.Timestamp(end_date))
-            rec_period = rec_df.loc[mask]
+            # 列名が英語/日本語どちらでも動くように吸収
+            dfp = rec_df.copy()
+            # 日付列名を特定
+            if "d" in dfp.columns:
+                date_col = "d"
+            elif "日付" in dfp.columns:
+                date_col = "日付"
+            else:
+                st.error("履歴データの日付列が見つかりません。"); st.stop()
+
+            dfp[date_col] = pd.to_datetime(dfp[date_col])
+            mask = (dfp[date_col] >= pd.Timestamp(start_date)) & (dfp[date_col] <= pd.Timestamp(end_date))
+            rec_period = dfp.loc[mask]
 
             if rec_period.empty:
                 totals = pd.DataFrame({"社員ID": [], "累計ポイント": []})
             else:
-                totals = (rec_period
-                          .groupby("社員ID", as_index=False)["ポイント"]
-                          .sum()
-                          .rename(columns={"ポイント": "累計ポイント"}))
+                # 社員ID・ポイントの列名対応
+                if {"emp_id", "points"}.issubset(rec_period.columns):
+                    totals = (rec_period
+                              .groupby("emp_id", as_index=False)["points"]
+                              .sum()
+                              .rename(columns={"emp_id": "社員ID", "points": "累計ポイント"}))
+                elif {"社員ID", "ポイント"}.issubset(rec_period.columns):
+                    totals = (rec_period
+                              .groupby("社員ID", as_index=False)["ポイント"]
+                              .sum()
+                              .rename(columns={"ポイント": "累計ポイント"}))
+                else:
+                    st.error("履歴データの列名（社員ID/ポイント）が見つかりません。")
+                    st.stop()
     else:
-        # 既存の全期間累計を使う（あなたのヘルパー関数）
-        totals = get_total_points_by_emp()  # 社員ID, 累計ポイント
+        # 全期間累計（この関数は 社員ID / 累計ポイント の日本語列を返す想定）
+        totals = get_total_points_by_emp()
 
     if roster.empty:
         st.info("まだ名簿がありません（設定→名簿編集で登録してください）")
@@ -564,12 +593,13 @@ elif page == "名簿":
         merged = pd.merge(roster, totals, on="社員ID", how="left")
         merged["累計ポイント"] = pd.to_numeric(merged["累計ポイント"], errors="coerce").fillna(0.0)
 
-        # 見やすい並び順: グループ → ポイント降順
-        merged = merged.sort_values(by=["グループ", "累計ポイント"], ascending=[True, False])
+        # ポイントの高い/低い順で並べ替え（社員IDは表示しない）
+        merged = merged.sort_values(by="累計ポイント", ascending=sort_ascending)
 
         st.dataframe(
             merged[["名前", "グループ", "累計ポイント"]],
-            hide_index=True
+            hide_index=True,
+            width="stretch"   # use_container_width の代替
         )
 
     st.caption("編集や新規登録は「設定」からのみできます。")
